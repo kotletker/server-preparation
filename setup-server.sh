@@ -32,6 +32,9 @@ if ! command -v curl >/dev/null 2>&1; then
   apt install -y curl
 fi
 
+inf "Обновление списка пакетов (apt update)"
+apt update
+
 ########################################
 # Меню выбора шагов
 ########################################
@@ -125,7 +128,7 @@ step_fallback_site() {
   fi
   inf "IP сервера: $SERVER_IP"
 
-  DOMAIN_IP="$(dig +short A "$DOMAIN" | tail -n1)"
+  DOMAIN_IP="$(dig +short A "$DOMAIN" | tail -n1 || true)"
   if [[ -z "$DOMAIN_IP" ]]; then
     warn "Не удалось получить A-запись для домена $DOMAIN (пусто)."
   fi
@@ -166,9 +169,15 @@ step_fallback_site() {
 
   TMP_DIR="$(mktemp -d)"
   curl -fsSL -o "$TMP_DIR/templates.zip" \
-    https://github.com/eGamesAPI/simple-web-templates/archive/refs/heads/master.zip
+    https://github.com/eGamesAPI/simple-web-templates/archive/refs/heads/main.zip
   unzip -q "$TMP_DIR/templates.zip" -d "$TMP_DIR"
-  TEMPLATES_DIR="$TMP_DIR/simple-web-templates-master"
+
+  TEMPLATES_DIR="$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+  if [[ -z "$TEMPLATES_DIR" || ! -d "$TEMPLATES_DIR" ]]; then
+    err "Не удалось найти распакованную папку с шаблонами."
+    exit 1
+  fi
+
   rm -rf "$TEMPLATES_DIR/assets" "$TEMPLATES_DIR/.gitattributes" \
          "$TEMPLATES_DIR/README.md" "$TEMPLATES_DIR/_config.yml" \
          "$TEMPLATES_DIR/random_site.sh"
