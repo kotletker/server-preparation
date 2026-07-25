@@ -21,6 +21,14 @@ err()  { echo -e "${RED}[ОШИБКА]${RESET} $*" >&2; }
 
 trap 'err "Скрипт остановлен из-за ошибки на строке $LINENO. Выполнение прервано."; exit 1' ERR
 
+CURRENT_TMP_DIR=""
+cleanup_on_exit() {
+  if [[ -n "$CURRENT_TMP_DIR" && -d "$CURRENT_TMP_DIR" ]]; then
+    rm -rf "$CURRENT_TMP_DIR"
+  fi
+}
+trap cleanup_on_exit EXIT
+
 if [[ $EUID -ne 0 ]]; then
   err "Запускайте скрипт от root (sudo bash $0)."
   exit 1
@@ -158,40 +166,45 @@ step_fallback_site() {
   SITE_CONF="/etc/nginx/sites-available/${DOMAIN}"
   SITE_LINK="/etc/nginx/sites-enabled/${DOMAIN}"
 
-  # --- каталог сайта + случайный шаблон ---
+  # --- каталог сайта + случайный шаблон (частичный git-checkout, без скачивания всего репозитория ~270 МБ) ---
   inf "Создание $WEBROOT и загрузка случайного шаблона"
   mkdir -p "$WEBROOT"
 
-  if ! command -v unzip >/dev/null 2>&1; then
-    inf "Установка unzip"
-    apt install -y unzip
+  if ! command -v git >/dev/null 2>&1; then
+    inf "Установка git"
+    apt install -y git
   fi
 
   TMP_DIR="$(mktemp -d)"
-  curl -fsSL -o "$TMP_DIR/templates.zip" \
-    https://github.com/eGamesAPI/simple-web-templates/archive/refs/heads/main.zip
-  unzip -q "$TMP_DIR/templates.zip" -d "$TMP_DIR"
+  CURRENT_TMP_DIR="$TMP_DIR"
 
-  TEMPLATES_DIR="$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type d | head -n1)"
-  if [[ -z "$TEMPLATES_DIR" || ! -d "$TEMPLATES_DIR" ]]; then
-    err "Не удалось найти распакованную папку с шаблонами."
+  git clone --quiet --filter=blob:none --sparse --depth 1 \
+    https://github.com/eGamesAPI/simple-web-templates.git "$TMP_DIR"
+
+  TEMPLATE_LIST="$(cd "$TMP_DIR" && git ls-tree -d --name-only HEAD | grep -vx "assets")"
+  if [[ -z "$TEMPLATE_LIST" ]]; then
+    err "Не удалось получить список шаблонов сайта."
     exit 1
   fi
 
-  rm -rf "$TEMPLATES_DIR/assets" "$TEMPLATES_DIR/.gitattributes" \
-         "$TEMPLATES_DIR/README.md" "$TEMPLATES_DIR/_config.yml" \
-         "$TEMPLATES_DIR/random_site.sh"
-
-  RANDOM_TEMPLATE="$(find "$TEMPLATES_DIR" -mindepth 1 -maxdepth 1 -type d | shuf -n1)"
-  if [[ -z "$RANDOM_TEMPLATE" ]]; then
+  RANDOM_TEMPLATE_NAME="$(echo "$TEMPLATE_LIST" | shuf -n1)"
+  if [[ -z "$RANDOM_TEMPLATE_NAME" ]]; then
     err "Не удалось выбрать шаблон сайта."
     exit 1
   fi
-  inf "Выбран шаблон: $(basename "$RANDOM_TEMPLATE")"
+  inf "Выбран шаблон: $RANDOM_TEMPLATE_NAME (скачивается только эта папка, не весь репозиторий)"
+
+  (cd "$TMP_DIR" && git sparse-checkout set --quiet "$RANDOM_TEMPLATE_NAME")
+
+  if [[ ! -d "$TMP_DIR/$RANDOM_TEMPLATE_NAME" ]]; then
+    err "Папка шаблона не появилась после sparse-checkout."
+    exit 1
+  fi
 
   rm -rf "${WEBROOT:?}"/*
-  cp -a "$RANDOM_TEMPLATE"/. "$WEBROOT"/
+  cp -a "$TMP_DIR/$RANDOM_TEMPLATE_NAME"/. "$WEBROOT"/
   rm -rf "$TMP_DIR"
+  CURRENT_TMP_DIR=""
   ok "Шаблон установлен в $WEBROOT"
 
   # --- nginx: базовый HTTP-блок (нужен для certbot) ---
