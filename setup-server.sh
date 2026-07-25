@@ -200,7 +200,7 @@ step_fallback_site() {
   fi
   inf "Выбран шаблон: $RANDOM_TEMPLATE_NAME (скачивается только эта папка, не весь репозиторий)"
 
-  (cd "$TMP_DIR" && git sparse-checkout set --quiet "$RANDOM_TEMPLATE_NAME")
+  (cd "$TMP_DIR" && git sparse-checkout set "$RANDOM_TEMPLATE_NAME")
 
   if [[ ! -d "$TMP_DIR/$RANDOM_TEMPLATE_NAME" ]]; then
     err "Папка шаблона не появилась после sparse-checkout."
