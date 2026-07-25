@@ -26,6 +26,12 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
+if ! command -v curl >/dev/null 2>&1; then
+  inf "Установка curl (требуется для дальнейших шагов)"
+  apt update
+  apt install -y curl
+fi
+
 ########################################
 # Меню выбора шагов
 ########################################
@@ -152,6 +158,11 @@ step_fallback_site() {
   # --- каталог сайта + случайный шаблон ---
   inf "Создание $WEBROOT и загрузка случайного шаблона"
   mkdir -p "$WEBROOT"
+
+  if ! command -v unzip >/dev/null 2>&1; then
+    inf "Установка unzip"
+    apt install -y unzip
+  fi
 
   TMP_DIR="$(mktemp -d)"
   curl -fsSL -o "$TMP_DIR/templates.zip" \
