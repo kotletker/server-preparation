@@ -5,9 +5,12 @@
 # 1) rsyslog
 # 2) traffic-guard (dotX12/traffic-guard) с antiscanner + government_networks листами
 # 3) fallback-сайт (nginx + certbot) на основе шаблона из eGamesAPI/simple-web-templates,
-#    домен запрашивается интерактивно и сверяется с внешним IP сервера
+#    домен запрашивается интерактивно и сверяется с внешним IP сервера.
+#    При установке сайта можно выбрать обычную версию конфига или версию под CDN
+#    (proxy_protocol + backend /api/v4/lop на 127.0.0.1:4443).
 #
-# Перед запуском спрашивает, какие шаги выполнять (по отдельности или всё подряд).
+# После выполнения любого пункта скрипт возвращается в главное меню.
+# Пункт 0 — выход из скрипта.
 # Останавливается на первой же ошибке любого шага.
 
 set -euo pipefail
@@ -44,46 +47,6 @@ inf "Обновление списка пакетов (apt update)"
 apt update
 
 ########################################
-# Меню выбора шагов
-########################################
-echo "Что выполнить?"
-echo "  1) rsyslog"
-echo "  2) traffic-guard"
-echo "  3) fallback-сайт (nginx + certbot)"
-echo "  0) всё подряд (1, 2, 3)"
-echo
-read -rp "Введите номера через запятую (например: 1,3) или 0 для всего: " CHOICE
-CHOICE="$(echo -n "$CHOICE" | xargs)"
-
-RUN_1=false; RUN_2=false; RUN_3=false
-if [[ -z "$CHOICE" ]]; then
-  err "Ничего не выбрано."
-  exit 1
-fi
-
-if [[ "$CHOICE" == "0" ]]; then
-  RUN_1=true; RUN_2=true; RUN_3=true
-else
-  IFS=',' read -ra PARTS <<< "$CHOICE"
-  for p in "${PARTS[@]}"; do
-    p="$(echo -n "$p" | xargs)"
-    case "$p" in
-      1) RUN_1=true ;;
-      2) RUN_2=true ;;
-      3) RUN_3=true ;;
-      *) err "Неизвестный пункт: '$p' (допустимо: 1, 2, 3, 0)"; exit 1 ;;
-    esac
-  done
-fi
-
-SELECTED=""
-if $RUN_1; then SELECTED+="1 "; fi
-if $RUN_2; then SELECTED+="2 "; fi
-if $RUN_3; then SELECTED+="3 "; fi
-inf "Будут выполнены шаги: ${SELECTED}"
-echo
-
-########################################
 # 1) rsyslog
 ########################################
 step_rsyslog() {
@@ -118,6 +81,16 @@ step_fallback_site() {
   if ! command -v dig >/dev/null 2>&1; then
     apt install -y dnsutils
   fi
+
+  echo "Какую версию конфига сайта установить?"
+  echo "  1) обычная (без CDN)"
+  echo "  2) под CDN (proxy_protocol + backend /api/v4/lop на 127.0.0.1:4443)"
+  read -rp "Выбор [1/2]: " SITE_VERSION
+  SITE_VERSION="$(echo -n "$SITE_VERSION" | xargs)"
+  case "$SITE_VERSION" in
+    1|2) ;;
+    *) err "Неизвестный вариант: '$SITE_VERSION' (допустимо 1 или 2)"; exit 1 ;;
+  esac
 
   read -rp "Введите домен сервера (например, example.com): " DOMAIN
   DOMAIN="$(echo -n "$DOMAIN" | xargs)"
@@ -245,8 +218,9 @@ EOF
   ok "Сертификат для $DOMAIN выпущен"
 
   # --- добавляем SSL-блок (127.0.0.1:8080) к уже существующему блоку на порту 80 ---
-  inf "Добавление SSL-блока (127.0.0.1:8080) к конфигу, блок на порту 80 остаётся"
-  cat >> "$SITE_CONF" <<EOF
+  if [[ "$SITE_VERSION" == "1" ]]; then
+    inf "Добавление обычного SSL-блока (127.0.0.1:8080) к конфигу, блок на порту 80 остаётся"
+    cat >> "$SITE_CONF" <<EOF
 
 server {
     listen 127.0.0.1:8080 ssl;
@@ -268,6 +242,46 @@ server {
     }
 }
 EOF
+  else
+    inf "Добавление SSL-блока под CDN (127.0.0.1:8080, proxy_protocol) к конфигу, блок на порту 80 остаётся"
+    cat >> "$SITE_CONF" <<EOF
+
+server {
+    listen 127.0.0.1:8080 ssl proxy_protocol;
+    http2 on;
+    server_name ${DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
+
+    root ${WEBROOT};
+    index index.html;
+
+    add_header X-Robots-Tag "noindex, nofollow, noarchive, nosnippet, noimageindex" always;
+
+    location /api/v4/lop {
+        proxy_pass http://127.0.0.1:4443;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
+}
+EOF
+  fi
 
   nginx -t
   systemctl restart nginx
@@ -282,10 +296,64 @@ EOF
 }
 
 ########################################
-# Запуск выбранных шагов
+# Главное меню
 ########################################
-if $RUN_1; then step_rsyslog; fi
-if $RUN_2; then step_traffic_guard; fi
-if $RUN_3; then step_fallback_site; fi
+while true; do
+  echo
+  echo "Что выполнить?"
+  echo "  1) rsyslog"
+  echo "  2) traffic-guard"
+  echo "  3) fallback-сайт (nginx + certbot)"
+  echo "  4) всё подряд (1, 2, 3)"
+  echo "  0) выход"
+  echo
+  read -rp "Введите номера через запятую (например: 1,3), 4 для всего или 0 для выхода: " CHOICE
+  CHOICE="$(echo -n "$CHOICE" | xargs)"
 
-ok "Готово: выбранные шаги выполнены успешно."
+  if [[ -z "$CHOICE" ]]; then
+    warn "Ничего не выбрано, попробуйте ещё раз."
+    continue
+  fi
+
+  if [[ "$CHOICE" == "0" ]]; then
+    inf "Выход."
+    exit 0
+  fi
+
+  RUN_1=false; RUN_2=false; RUN_3=false
+  BAD_CHOICE=false
+
+  if [[ "$CHOICE" == "4" ]]; then
+    RUN_1=true; RUN_2=true; RUN_3=true
+  else
+    IFS=',' read -ra PARTS <<< "$CHOICE"
+    for p in "${PARTS[@]}"; do
+      p="$(echo -n "$p" | xargs)"
+      case "$p" in
+        1) RUN_1=true ;;
+        2) RUN_2=true ;;
+        3) RUN_3=true ;;
+        *) warn "Неизвестный пункт: '$p' (допустимо: 1, 2, 3, 4, 0)"; BAD_CHOICE=true ;;
+      esac
+    done
+  fi
+
+  if $BAD_CHOICE; then
+    continue
+  fi
+
+  SELECTED=""
+  if $RUN_1; then SELECTED+="1 "; fi
+  if $RUN_2; then SELECTED+="2 "; fi
+  if $RUN_3; then SELECTED+="3 "; fi
+  inf "Будут выполнены шаги: ${SELECTED}"
+  echo
+
+  if $RUN_1; then step_rsyslog; fi
+  if $RUN_2; then step_traffic_guard; fi
+  if $RUN_3; then step_fallback_site; fi
+
+  ok "Готово: выбранные шаги выполнены успешно."
+  echo
+  inf "Возврат в главное меню."
+done
