@@ -175,7 +175,13 @@ step_fallback_site() {
     apt install -y git
   fi
 
-  TMP_DIR="$(mktemp -d)"
+  AVAIL_MB="$(df -Pm /var/tmp | awk 'NR==2 {print $4}')"
+  if [[ -n "$AVAIL_MB" && "$AVAIL_MB" -lt 200 ]]; then
+    err "Мало свободного места в /var/tmp (${AVAIL_MB} МБ). Освободите место (df -h) и запустите шаг заново."
+    exit 1
+  fi
+
+  TMP_DIR="$(mktemp -d --tmpdir=/var/tmp)"
   CURRENT_TMP_DIR="$TMP_DIR"
 
   git clone --quiet --filter=blob:none --sparse --depth 1 \
