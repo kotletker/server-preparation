@@ -47,10 +47,10 @@ inf "Обновление списка пакетов (apt update)"
 apt update
 
 ########################################
-# 1) rsyslog
+# 1) rsyslog + traffic-guard
 ########################################
 step_rsyslog() {
-  inf "Шаг 1: установка rsyslog"
+  inf "rsyslog: установка"
   apt update
   apt install rsyslog -y
   systemctl enable --now rsyslog
@@ -58,11 +58,8 @@ step_rsyslog() {
   ok "rsyslog установлен и запущен"
 }
 
-########################################
-# 2) traffic-guard
-########################################
 step_traffic_guard() {
-  inf "Шаг 2: установка traffic-guard"
+  inf "traffic-guard: установка"
   curl -fsSL https://raw.githubusercontent.com/dotX12/traffic-guard/master/install.sh | bash
 
   traffic-guard full \
@@ -72,11 +69,18 @@ step_traffic_guard() {
   ok "traffic-guard установлен и настроен"
 }
 
+step_base_setup() {
+  inf "Шаг 1: rsyslog + traffic-guard"
+  step_rsyslog
+  step_traffic_guard
+  ok "Шаг 1 завершён: rsyslog и traffic-guard установлены"
+}
+
 ########################################
-# 3) fallback-сайт: домен, nginx, certbot
+# 2) fallback-сайт: домен, nginx, certbot
 ########################################
 step_fallback_site() {
-  inf "Шаг 3: настройка fallback-сайта"
+  inf "Шаг 2: настройка fallback-сайта"
 
   if ! command -v dig >/dev/null 2>&1; then
     apt install -y dnsutils
@@ -301,13 +305,12 @@ EOF
 while true; do
   echo
   echo "Что выполнить?"
-  echo "  1) rsyslog"
-  echo "  2) traffic-guard"
-  echo "  3) fallback-сайт (nginx + certbot)"
-  echo "  4) всё подряд (1, 2, 3)"
+  echo "  1) rsyslog + traffic-guard"
+  echo "  2) fallback-сайт (nginx + certbot)"
+  echo "  3) всё подряд (1, 2)"
   echo "  0) выход"
   echo
-  read -rp "Введите номера через запятую (например: 1,3), 4 для всего или 0 для выхода: " CHOICE
+  read -rp "Введите номера через запятую (например: 1,2), 3 для всего или 0 для выхода: " CHOICE
   CHOICE="$(echo -n "$CHOICE" | xargs)"
 
   if [[ -z "$CHOICE" ]]; then
@@ -320,20 +323,19 @@ while true; do
     exit 0
   fi
 
-  RUN_1=false; RUN_2=false; RUN_3=false
+  RUN_BASE=false; RUN_SITE=false
   BAD_CHOICE=false
 
-  if [[ "$CHOICE" == "4" ]]; then
-    RUN_1=true; RUN_2=true; RUN_3=true
+  if [[ "$CHOICE" == "3" ]]; then
+    RUN_BASE=true; RUN_SITE=true
   else
     IFS=',' read -ra PARTS <<< "$CHOICE"
     for p in "${PARTS[@]}"; do
       p="$(echo -n "$p" | xargs)"
       case "$p" in
-        1) RUN_1=true ;;
-        2) RUN_2=true ;;
-        3) RUN_3=true ;;
-        *) warn "Неизвестный пункт: '$p' (допустимо: 1, 2, 3, 4, 0)"; BAD_CHOICE=true ;;
+        1) RUN_BASE=true ;;
+        2) RUN_SITE=true ;;
+        *) warn "Неизвестный пункт: '$p' (допустимо: 1, 2, 3, 0)"; BAD_CHOICE=true ;;
       esac
     done
   fi
@@ -343,15 +345,13 @@ while true; do
   fi
 
   SELECTED=""
-  if $RUN_1; then SELECTED+="1 "; fi
-  if $RUN_2; then SELECTED+="2 "; fi
-  if $RUN_3; then SELECTED+="3 "; fi
+  if $RUN_BASE; then SELECTED+="1 "; fi
+  if $RUN_SITE; then SELECTED+="2 "; fi
   inf "Будут выполнены шаги: ${SELECTED}"
   echo
 
-  if $RUN_1; then step_rsyslog; fi
-  if $RUN_2; then step_traffic_guard; fi
-  if $RUN_3; then step_fallback_site; fi
+  if $RUN_BASE; then step_base_setup; fi
+  if $RUN_SITE; then step_fallback_site; fi
 
   ok "Готово: выбранные шаги выполнены успешно."
   echo
