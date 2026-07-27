@@ -45,11 +45,11 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 if ! command -v curl >/dev/null 2>&1; then
-  apt update -qq >/dev/null
-  apt install -y -qq curl >/dev/null
+  apt-get update -qq >/dev/null
+  apt-get install -y -qq curl >/dev/null
 fi
 
-apt update -qq >/dev/null
+apt-get update -qq >/dev/null
 
 # --- помощник: определение реального порта SSH (учитывает Include/значения по умолчанию) ---
 detect_ssh_port() {
@@ -76,8 +76,8 @@ ufw_allow() {
 ########################################
 step_ufw() {
   inf "Шаг 1: установка и настройка ufw"
-  apt update -qq >/dev/null
-  apt install -y -qq ufw >/dev/null
+  apt-get update -qq >/dev/null
+  apt-get install -y -qq ufw >/dev/null
 
   local ssh_port
   ssh_port="$(detect_ssh_port)"
@@ -95,8 +95,8 @@ step_ufw() {
 ########################################
 step_rsyslog() {
   inf "rsyslog: установка"
-  apt update -qq >/dev/null
-  apt install -y -qq rsyslog >/dev/null
+  apt-get update -qq >/dev/null
+  apt-get install -y -qq rsyslog >/dev/null
   systemctl enable --now rsyslog
   systemctl restart rsyslog
   ok "rsyslog установлен и запущен"
@@ -127,7 +127,7 @@ step_fallback_site() {
   inf "Шаг 3: настройка fallback-сайта"
 
   if ! command -v dig >/dev/null 2>&1; then
-    apt install -y -qq dnsutils >/dev/null
+    apt-get install -y -qq dnsutils >/dev/null
   fi
 
   echo -e "${CYAN}Какую версию конфига сайта установить?${RESET}"
@@ -193,7 +193,7 @@ step_fallback_site() {
 
   if ! command -v git >/dev/null 2>&1; then
     inf "Установка git"
-    apt install -y -qq git >/dev/null
+    apt-get install -y -qq git >/dev/null
   fi
 
   AVAIL_MB="$(df -Pm /var/tmp | awk 'NR==2 {print $4}')"
@@ -236,7 +236,7 @@ step_fallback_site() {
 
   # --- nginx: базовый HTTP-блок (нужен для certbot) ---
   inf "Установка nginx"
-  apt install -y -qq nginx >/dev/null
+  apt-get install -y -qq nginx >/dev/null
 
   ufw_allow 80/tcp comment 'HTTP (fallback site + certbot)'
 
@@ -263,7 +263,7 @@ EOF
 
   # --- certbot ---
   inf "Установка certbot и выпуск сертификата"
-  apt install -y -qq certbot >/dev/null
+  apt-get install -y -qq certbot >/dev/null
   certbot certonly --webroot -w "$WEBROOT" -d "$DOMAIN" --agree-tos -m "$CERT_EMAIL" --non-interactive
   ok "Сертификат для $DOMAIN выпущен"
 
