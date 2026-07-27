@@ -22,7 +22,8 @@
 set -euo pipefail
 
 # ---------- оформление ----------
-RED="\033[31m"; GREEN="\033[32m"; YELLOW="\033[33m"; BLUE="\033[36m"; RESET="\033[0m"
+RED="\033[0;31m"; GREEN="\033[0;32m"; YELLOW="\033[0;33m"; BLUE="\033[0;36m"
+BOLD="\033[1m"; CYAN="\033[1;36m"; MAGENTA="\033[0;35m"; GRAY="\033[0;90m"; RESET="\033[0m"
 ok()   { echo -e "${GREEN}[OK]${RESET} $*"; }
 inf()  { echo -e "${BLUE}[*]${RESET} $*"; }
 warn() { echo -e "${YELLOW}[!]${RESET} $*"; }
@@ -44,13 +45,11 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 if ! command -v curl >/dev/null 2>&1; then
-  inf "Установка curl (требуется для дальнейших шагов)"
-  apt update
-  apt install -y curl
+  apt update -qq >/dev/null
+  apt install -y curl -qq >/dev/null
 fi
 
-inf "Обновление списка пакетов (apt update)"
-apt update
+apt update -qq >/dev/null
 
 # --- помощник: определение реального порта SSH (учитывает Include/значения по умолчанию) ---
 detect_ssh_port() {
