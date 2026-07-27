@@ -6,8 +6,8 @@
 # 2) rsyslog + traffic-guard (dotX12/traffic-guard) с antiscanner + government_networks листами
 # 3) fallback-сайт (nginx + certbot) на основе шаблона из eGamesAPI/simple-web-templates,
 #    домен запрашивается интерактивно и сверяется с внешним IP сервера.
-#    При установке сайта можно выбрать обычную версию конфига или версию под CDN
-#    (proxy_protocol + backend /api/v4/lop на 127.0.0.1:4443).
+#    При установке сайта можно выбрать обычную версию конфига (с поддержкой proxy_protocol)
+#    или версию под CDN (proxy_protocol + backend /api/v4/lop на 127.0.0.1:4443).
 #    Если ufw активен, автоматически открывается порт 80/tcp (нужен для certbot и самого сайта).
 # 4) cake (qdisc) + BBR (tcp congestion control) через sysctl
 # 5) всё подряд (1, 2, 3, 4)
@@ -46,7 +46,7 @@ fi
 
 if ! command -v curl >/dev/null 2>&1; then
   apt update -qq >/dev/null
-  apt install -y curl -qq >/dev/null
+  apt install -y -qq curl >/dev/null
 fi
 
 apt update -qq >/dev/null
@@ -76,8 +76,8 @@ ufw_allow() {
 ########################################
 step_ufw() {
   inf "Шаг 1: установка и настройка ufw"
-  apt update
-  apt install -y ufw
+  apt update -qq >/dev/null
+  apt install -y -qq ufw >/dev/null
 
   local ssh_port
   ssh_port="$(detect_ssh_port)"
@@ -95,8 +95,8 @@ step_ufw() {
 ########################################
 step_rsyslog() {
   inf "rsyslog: установка"
-  apt update
-  apt install rsyslog -y
+  apt update -qq >/dev/null
+  apt install -y -qq rsyslog >/dev/null
   systemctl enable --now rsyslog
   systemctl restart rsyslog
   ok "rsyslog установлен и запущен"
@@ -127,12 +127,12 @@ step_fallback_site() {
   inf "Шаг 3: настройка fallback-сайта"
 
   if ! command -v dig >/dev/null 2>&1; then
-    apt install -y dnsutils
+    apt install -y -qq dnsutils >/dev/null
   fi
 
-  echo "Какую версию конфига сайта установить?"
-  echo "  1) обычная (без CDN)"
-  echo "  2) под CDN (proxy_protocol + backend /api/v4/lop на 127.0.0.1:4443)"
+  echo -e "${CYAN}Какую версию конфига сайта установить?${RESET}"
+  echo -e "  ${BOLD}1)${RESET} обычная (с поддержкой proxy_protocol)"
+  echo -e "  ${BOLD}2)${RESET} под CDN (proxy_protocol + backend /api/v4/lop на 127.0.0.1:4443)"
   read -rp "Выбор [1/2]: " SITE_VERSION
   SITE_VERSION="$(echo -n "$SITE_VERSION" | xargs)"
   case "$SITE_VERSION" in
@@ -193,7 +193,7 @@ step_fallback_site() {
 
   if ! command -v git >/dev/null 2>&1; then
     inf "Установка git"
-    apt install -y git
+    apt install -y -qq git >/dev/null
   fi
 
   AVAIL_MB="$(df -Pm /var/tmp | awk 'NR==2 {print $4}')"
@@ -236,7 +236,7 @@ step_fallback_site() {
 
   # --- nginx: базовый HTTP-блок (нужен для certbot) ---
   inf "Установка nginx"
-  apt install nginx -y
+  apt install -y -qq nginx >/dev/null
 
   ufw_allow 80/tcp comment 'HTTP (fallback site + certbot)'
 
@@ -263,17 +263,17 @@ EOF
 
   # --- certbot ---
   inf "Установка certbot и выпуск сертификата"
-  apt install -y certbot
+  apt install -y -qq certbot >/dev/null
   certbot certonly --webroot -w "$WEBROOT" -d "$DOMAIN" --agree-tos -m "$CERT_EMAIL" --non-interactive
   ok "Сертификат для $DOMAIN выпущен"
 
   # --- добавляем SSL-блок (127.0.0.1:8080) к уже существующему блоку на порту 80 ---
   if [[ "$SITE_VERSION" == "1" ]]; then
-    inf "Добавление обычного SSL-блока (127.0.0.1:8080) к конфигу, блок на порту 80 остаётся"
+    inf "Добавление обычного SSL-блока (127.0.0.1:8080, proxy_protocol) к конфигу, блок на порту 80 остаётся"
     cat >> "$SITE_CONF" <<EOF
 
 server {
-    listen 127.0.0.1:8080 ssl;
+    listen 127.0.0.1:8080 ssl proxy_protocol;
     http2 on;
     server_name ${DOMAIN};
 
@@ -281,6 +281,9 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
     ssl_protocols TLSv1.3;
     ssl_conf_command Groups X25519MLKEM768:X25519;
+
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
 
     root ${WEBROOT};
     index index.html;
@@ -409,22 +412,35 @@ util_ufw_allow_ip_port() {
 ########################################
 # Главное меню
 ########################################
+show_menu() {
+  if [[ -t 1 ]]; then
+    clear 2>/dev/null || true
+  fi
+  echo -e "${CYAN}${BOLD}════════════════════════════════════════════════${RESET}"
+  echo -e "${CYAN}${BOLD}         Настройка Debian-сервера${RESET}"
+  echo -e "${CYAN}${BOLD}════════════════════════════════════════════════${RESET}"
+  echo
+  echo -e "${BOLD}Что выполнить?${RESET}"
+  echo -e "  ${GREEN}1)${RESET} ufw: установка + открытие порта SSH"
+  echo -e "  ${GREEN}2)${RESET} rsyslog + traffic-guard"
+  echo -e "  ${GREEN}3)${RESET} fallback-сайт (nginx + certbot)"
+  echo -e "  ${GREEN}4)${RESET} cake + BBR (sysctl)"
+  echo -e "  ${GREEN}5)${RESET} всё подряд (1, 2, 3, 4)"
+  echo
+  echo -e "  ${MAGENTA}6)${RESET} ${GRAY}[утилита, не входит в «всё»]${RESET} ufw: разрешить IP на порт"
+  echo
+  echo -e "  ${RED}0)${RESET} выход"
+  echo
+}
+
 while true; do
-  echo
-  echo "Что выполнить?"
-  echo "  1) ufw: установка + открытие порта SSH"
-  echo "  2) rsyslog + traffic-guard"
-  echo "  3) fallback-сайт (nginx + certbot)"
-  echo "  4) cake + BBR (sysctl)"
-  echo "  5) всё подряд (1, 2, 3, 4)"
-  echo "  6) [утилита, не входит в 'всё'] ufw: разрешить IP на порт"
-  echo "  0) выход"
-  echo
-  read -rp "Введите номера через запятую (например: 1,3), 5 для всего или 0 для выхода: " CHOICE
+  show_menu
+  read -rp "$(echo -e "${BOLD}Введите номера через запятую (например: 1,3), 5 для всего или 0 для выхода:${RESET} ")" CHOICE
   CHOICE="$(echo -n "$CHOICE" | xargs)"
 
   if [[ -z "$CHOICE" ]]; then
     warn "Ничего не выбрано, попробуйте ещё раз."
+    sleep 1
     continue
   fi
 
@@ -454,6 +470,7 @@ while true; do
   fi
 
   if $BAD_CHOICE; then
+    sleep 1
     continue
   fi
 
@@ -474,5 +491,5 @@ while true; do
 
   ok "Готово: выбранные шаги выполнены успешно."
   echo
-  inf "Возврат в главное меню."
+  read -rp "Нажмите Enter, чтобы вернуться в меню..." _ || true
 done
