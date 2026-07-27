@@ -2,14 +2,18 @@
 #
 # setup-server.sh
 #
-# 1) ufw: установка, открытие SSH-порта (определяется автоматически) + два
-#    точечных разрешения для IP 212.189.119.13 (порты 22 и 45876), включение ufw
+# 1) ufw: установка + открытие SSH-порта (определяется автоматически) + включение ufw
 # 2) rsyslog + traffic-guard (dotX12/traffic-guard) с antiscanner + government_networks листами
 # 3) fallback-сайт (nginx + certbot) на основе шаблона из eGamesAPI/simple-web-templates,
 #    домен запрашивается интерактивно и сверяется с внешним IP сервера.
 #    При установке сайта можно выбрать обычную версию конфига или версию под CDN
 #    (proxy_protocol + backend /api/v4/lop на 127.0.0.1:4443).
 #    Если ufw активен, автоматически открывается порт 80/tcp (нужен для certbot и самого сайта).
+# 4) cake (qdisc) + BBR (tcp congestion control) через sysctl
+# 5) всё подряд (1, 2, 3, 4)
+#
+# Отдельная утилита (НЕ входит в "всё подряд"): разрешить в ufw доступ
+# с конкретного IP на конкретный порт (sudo ufw allow from <ip> to any port <port> proto tcp).
 #
 # После выполнения любого пункта скрипт возвращается в главное меню.
 # Пункт 0 — выход из скрипта.
@@ -81,12 +85,10 @@ step_ufw() {
   inf "Обнаруженный порт SSH: ${ssh_port}"
 
   ufw allow "${ssh_port}/tcp" comment 'SSH'
-  ufw allow from 212.189.119.13 to any port 22 proto tcp
-  ufw allow from 212.189.119.13 to any port 45876 proto tcp
 
   ufw --force enable
   ufw status verbose
-  ok "ufw установлен, правила добавлены, firewall включён (SSH-порт ${ssh_port}/tcp открыт)"
+  ok "ufw установлен, SSH-порт ${ssh_port}/tcp открыт, firewall включён"
 }
 
 ########################################
@@ -345,18 +347,81 @@ EOF
 }
 
 ########################################
+# 4) cake (qdisc) + BBR (tcp congestion control)
+########################################
+step_bbr_cake() {
+  inf "Шаг 4: включение cake (qdisc) + BBR (congestion control)"
+
+  local old_qdisc old_cc
+  old_qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || echo '(не удалось прочитать)')"
+  old_cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '(не удалось прочитать)')"
+  inf "Было net.core.default_qdisc = ${old_qdisc}"
+  inf "Было net.ipv4.tcp_congestion_control = ${old_cc}"
+
+  cat > /etc/sysctl.d/99-cake-bbr.conf <<EOF
+net.core.default_qdisc = cake
+net.ipv4.tcp_congestion_control = bbr
+EOF
+
+  sysctl --system >/dev/null
+
+  local new_qdisc new_cc
+  new_qdisc="$(sysctl -n net.core.default_qdisc)"
+  new_cc="$(sysctl -n net.ipv4.tcp_congestion_control)"
+
+  ok "Стало net.core.default_qdisc = ${new_qdisc} (было: ${old_qdisc})"
+  ok "Стало net.ipv4.tcp_congestion_control = ${new_cc} (было: ${old_cc})"
+}
+
+########################################
+# Отдельная утилита (не входит в "всё подряд"):
+# разрешить в ufw доступ с конкретного IP на конкретный порт
+########################################
+util_ufw_allow_ip_port() {
+  inf "Утилита: разрешить в ufw доступ с конкретного IP на конкретный порт"
+
+  if ! command -v ufw >/dev/null 2>&1; then
+    err "ufw не установлен. Сначала выполните пункт 1 (установка ufw)."
+    exit 1
+  fi
+
+  read -rp "Введите IP-адрес: " ALLOW_IP
+  ALLOW_IP="$(echo -n "$ALLOW_IP" | xargs)"
+  if [[ -z "$ALLOW_IP" ]]; then
+    err "IP-адрес не может быть пустым."
+    exit 1
+  fi
+  if [[ ! "$ALLOW_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    err "IP-адрес не похож на корректный IPv4: '$ALLOW_IP'"
+    exit 1
+  fi
+
+  read -rp "Введите порт: " ALLOW_PORT
+  ALLOW_PORT="$(echo -n "$ALLOW_PORT" | xargs)"
+  if [[ ! "$ALLOW_PORT" =~ ^[0-9]+$ ]] || (( ALLOW_PORT < 1 || ALLOW_PORT > 65535 )); then
+    err "Некорректный порт: '$ALLOW_PORT' (должен быть числом от 1 до 65535)."
+    exit 1
+  fi
+
+  ufw allow from "$ALLOW_IP" to any port "$ALLOW_PORT" proto tcp
+  ok "Правило добавлено: разрешён доступ с $ALLOW_IP на порт $ALLOW_PORT/tcp"
+}
+
+########################################
 # Главное меню
 ########################################
 while true; do
   echo
   echo "Что выполнить?"
-  echo "  1) ufw (firewall)"
+  echo "  1) ufw: установка + открытие порта SSH"
   echo "  2) rsyslog + traffic-guard"
   echo "  3) fallback-сайт (nginx + certbot)"
-  echo "  4) всё подряд (1, 2, 3)"
+  echo "  4) cake + BBR (sysctl)"
+  echo "  5) всё подряд (1, 2, 3, 4)"
+  echo "  6) [утилита, не входит в 'всё'] ufw: разрешить IP на порт"
   echo "  0) выход"
   echo
-  read -rp "Введите номера через запятую (например: 1,3), 4 для всего или 0 для выхода: " CHOICE
+  read -rp "Введите номера через запятую (например: 1,3), 5 для всего или 0 для выхода: " CHOICE
   CHOICE="$(echo -n "$CHOICE" | xargs)"
 
   if [[ -z "$CHOICE" ]]; then
@@ -369,11 +434,11 @@ while true; do
     exit 0
   fi
 
-  RUN_UFW=false; RUN_BASE=false; RUN_SITE=false
+  RUN_UFW=false; RUN_BASE=false; RUN_SITE=false; RUN_BBR=false; RUN_UTIL=false
   BAD_CHOICE=false
 
-  if [[ "$CHOICE" == "4" ]]; then
-    RUN_UFW=true; RUN_BASE=true; RUN_SITE=true
+  if [[ "$CHOICE" == "5" ]]; then
+    RUN_UFW=true; RUN_BASE=true; RUN_SITE=true; RUN_BBR=true
   else
     IFS=',' read -ra PARTS <<< "$CHOICE"
     for p in "${PARTS[@]}"; do
@@ -382,7 +447,9 @@ while true; do
         1) RUN_UFW=true ;;
         2) RUN_BASE=true ;;
         3) RUN_SITE=true ;;
-        *) warn "Неизвестный пункт: '$p' (допустимо: 1, 2, 3, 4, 0)"; BAD_CHOICE=true ;;
+        4) RUN_BBR=true ;;
+        6) RUN_UTIL=true ;;
+        *) warn "Неизвестный пункт: '$p' (допустимо: 1, 2, 3, 4, 5, 6, 0)"; BAD_CHOICE=true ;;
       esac
     done
   fi
@@ -395,12 +462,16 @@ while true; do
   if $RUN_UFW; then SELECTED+="1 "; fi
   if $RUN_BASE; then SELECTED+="2 "; fi
   if $RUN_SITE; then SELECTED+="3 "; fi
+  if $RUN_BBR; then SELECTED+="4 "; fi
+  if $RUN_UTIL; then SELECTED+="6(утилита) "; fi
   inf "Будут выполнены шаги: ${SELECTED}"
   echo
 
   if $RUN_UFW; then step_ufw; fi
   if $RUN_BASE; then step_base_setup; fi
   if $RUN_SITE; then step_fallback_site; fi
+  if $RUN_BBR; then step_bbr_cake; fi
+  if $RUN_UTIL; then util_ufw_allow_ip_port; fi
 
   ok "Готово: выбранные шаги выполнены успешно."
   echo
