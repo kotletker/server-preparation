@@ -2,12 +2,14 @@
 #
 # setup-server.sh
 #
-# 1) rsyslog
-# 2) traffic-guard (dotX12/traffic-guard) с antiscanner + government_networks листами
+# 1) ufw: установка, открытие SSH-порта (определяется автоматически) + два
+#    точечных разрешения для IP 212.189.119.13 (порты 22 и 45876), включение ufw
+# 2) rsyslog + traffic-guard (dotX12/traffic-guard) с antiscanner + government_networks листами
 # 3) fallback-сайт (nginx + certbot) на основе шаблона из eGamesAPI/simple-web-templates,
 #    домен запрашивается интерактивно и сверяется с внешним IP сервера.
 #    При установке сайта можно выбрать обычную версию конфига или версию под CDN
 #    (proxy_protocol + backend /api/v4/lop на 127.0.0.1:4443).
+#    Если ufw активен, автоматически открывается порт 80/tcp (нужен для certbot и самого сайта).
 #
 # После выполнения любого пункта скрипт возвращается в главное меню.
 # Пункт 0 — выход из скрипта.
@@ -46,8 +48,49 @@ fi
 inf "Обновление списка пакетов (apt update)"
 apt update
 
+# --- помощник: определение реального порта SSH (учитывает Include/значения по умолчанию) ---
+detect_ssh_port() {
+  local port
+  port="$(sshd -T 2>/dev/null | awk '$1=="port"{print $2; exit}')"
+  if [[ -z "$port" ]]; then
+    port=22
+  fi
+  echo "$port"
+}
+
+# --- помощник: добавить правило ufw, только если ufw установлен и активен ---
+ufw_allow() {
+  if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+    ufw allow "$@"
+    inf "ufw: применено правило (ufw allow $*)"
+  else
+    warn "ufw не установлен/не активен — пропускаю правило (ufw allow $*). При необходимости откройте порт вручную."
+  fi
+}
+
 ########################################
-# 1) rsyslog + traffic-guard
+# 1) ufw
+########################################
+step_ufw() {
+  inf "Шаг 1: установка и настройка ufw"
+  apt update
+  apt install -y ufw
+
+  local ssh_port
+  ssh_port="$(detect_ssh_port)"
+  inf "Обнаруженный порт SSH: ${ssh_port}"
+
+  ufw allow "${ssh_port}/tcp" comment 'SSH'
+  ufw allow from 212.189.119.13 to any port 22 proto tcp
+  ufw allow from 212.189.119.13 to any port 45876 proto tcp
+
+  ufw --force enable
+  ufw status verbose
+  ok "ufw установлен, правила добавлены, firewall включён (SSH-порт ${ssh_port}/tcp открыт)"
+}
+
+########################################
+# 2) rsyslog + traffic-guard
 ########################################
 step_rsyslog() {
   inf "rsyslog: установка"
@@ -70,17 +113,17 @@ step_traffic_guard() {
 }
 
 step_base_setup() {
-  inf "Шаг 1: rsyslog + traffic-guard"
+  inf "Шаг 2: rsyslog + traffic-guard"
   step_rsyslog
   step_traffic_guard
-  ok "Шаг 1 завершён: rsyslog и traffic-guard установлены"
+  ok "Шаг 2 завершён: rsyslog и traffic-guard установлены"
 }
 
 ########################################
-# 2) fallback-сайт: домен, nginx, certbot
+# 3) fallback-сайт: домен, nginx, certbot
 ########################################
 step_fallback_site() {
-  inf "Шаг 2: настройка fallback-сайта"
+  inf "Шаг 3: настройка fallback-сайта"
 
   if ! command -v dig >/dev/null 2>&1; then
     apt install -y dnsutils
@@ -194,6 +237,8 @@ step_fallback_site() {
   inf "Установка nginx"
   apt install nginx -y
 
+  ufw_allow 80/tcp comment 'HTTP (fallback site + certbot)'
+
   inf "Настройка HTTP-конфига (порт 80) для выпуска сертификата"
   cat > "$SITE_CONF" <<EOF
 server {
@@ -305,12 +350,13 @@ EOF
 while true; do
   echo
   echo "Что выполнить?"
-  echo "  1) rsyslog + traffic-guard"
-  echo "  2) fallback-сайт (nginx + certbot)"
-  echo "  3) всё подряд (1, 2)"
+  echo "  1) ufw (firewall)"
+  echo "  2) rsyslog + traffic-guard"
+  echo "  3) fallback-сайт (nginx + certbot)"
+  echo "  4) всё подряд (1, 2, 3)"
   echo "  0) выход"
   echo
-  read -rp "Введите номера через запятую (например: 1,2), 3 для всего или 0 для выхода: " CHOICE
+  read -rp "Введите номера через запятую (например: 1,3), 4 для всего или 0 для выхода: " CHOICE
   CHOICE="$(echo -n "$CHOICE" | xargs)"
 
   if [[ -z "$CHOICE" ]]; then
@@ -323,19 +369,20 @@ while true; do
     exit 0
   fi
 
-  RUN_BASE=false; RUN_SITE=false
+  RUN_UFW=false; RUN_BASE=false; RUN_SITE=false
   BAD_CHOICE=false
 
-  if [[ "$CHOICE" == "3" ]]; then
-    RUN_BASE=true; RUN_SITE=true
+  if [[ "$CHOICE" == "4" ]]; then
+    RUN_UFW=true; RUN_BASE=true; RUN_SITE=true
   else
     IFS=',' read -ra PARTS <<< "$CHOICE"
     for p in "${PARTS[@]}"; do
       p="$(echo -n "$p" | xargs)"
       case "$p" in
-        1) RUN_BASE=true ;;
-        2) RUN_SITE=true ;;
-        *) warn "Неизвестный пункт: '$p' (допустимо: 1, 2, 3, 0)"; BAD_CHOICE=true ;;
+        1) RUN_UFW=true ;;
+        2) RUN_BASE=true ;;
+        3) RUN_SITE=true ;;
+        *) warn "Неизвестный пункт: '$p' (допустимо: 1, 2, 3, 4, 0)"; BAD_CHOICE=true ;;
       esac
     done
   fi
@@ -345,11 +392,13 @@ while true; do
   fi
 
   SELECTED=""
-  if $RUN_BASE; then SELECTED+="1 "; fi
-  if $RUN_SITE; then SELECTED+="2 "; fi
+  if $RUN_UFW; then SELECTED+="1 "; fi
+  if $RUN_BASE; then SELECTED+="2 "; fi
+  if $RUN_SITE; then SELECTED+="3 "; fi
   inf "Будут выполнены шаги: ${SELECTED}"
   echo
 
+  if $RUN_UFW; then step_ufw; fi
   if $RUN_BASE; then step_base_setup; fi
   if $RUN_SITE; then step_fallback_site; fi
 
