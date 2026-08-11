@@ -9,8 +9,9 @@
 #    При установке сайта можно выбрать обычную версию конфига (с поддержкой proxy_protocol)
 #    или версию под CDN (proxy_protocol + backend /api/v4/lop на 127.0.0.1:4443).
 #    Если ufw активен, автоматически открывается порт 80/tcp (нужен для certbot и самого сайта).
-# 4) cake (qdisc) + BBR (tcp congestion control) через sysctl
-# 5) всё подряд (1, 2, 3, 4)
+# 4) fq_codel (qdisc) + BBR (tcp congestion control) через sysctl
+# 5) Docker через официальный apt-репозиторий Docker
+# 6) всё подряд (1, 2, 3, 4, 5)
 #
 # Отдельная утилита (НЕ входит в "всё подряд"): разрешить в ufw доступ
 # с конкретного IP на конкретный порт (sudo ufw allow from <ip> to any port <port> proto tcp).
@@ -46,7 +47,7 @@ fi
 
 if ! command -v curl >/dev/null 2>&1; then
   apt-get update -qq >/dev/null
-  apt-get install -y -qq curl >/dev/null
+  apt-get install -y -qq curl ca-certificates >/dev/null
 fi
 
 apt-get update -qq >/dev/null
@@ -54,7 +55,7 @@ apt-get update -qq >/dev/null
 # --- помощник: определение реального порта SSH (учитывает Include/значения по умолчанию) ---
 detect_ssh_port() {
   local port
-  port="$(sshd -T 2>/dev/null | awk '$1=="port"{print $2; exit}')"
+  port="$(sshd -T 2>/dev/null | awk '$1=="port"{print $2; exit}' || true)"
   if [[ -z "$port" ]]; then
     port=22
   fi
@@ -263,7 +264,7 @@ EOF
 
   # --- certbot ---
   inf "Установка certbot и выпуск сертификата"
-  apt-get install -y -qq certbot >/dev/null
+  apt-get install -y -qq certbot openssl >/dev/null
   certbot certonly --webroot -w "$WEBROOT" -d "$DOMAIN" --agree-tos -m "$CERT_EMAIL" --non-interactive
   ok "Сертификат для $DOMAIN выпущен"
 
@@ -341,18 +342,17 @@ EOF
   ok "nginx настроен: порт 80 (acme-challenge/404) + 127.0.0.1:8080 (SSL-backend)"
 
   # --- проверка сертификата ---
-  inf "Проверка сертификата через openssl s_client"
-  openssl s_client -connect 127.0.0.1:8080 -servername "$DOMAIN" </dev/null 2>/dev/null \
-    | openssl x509 -noout -subject -dates
+  inf "Проверка выпущенного сертификата"
+  openssl x509 -in "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" -noout -subject -dates
 
   ok "fallback-сайт для ${DOMAIN} настроен успешно."
 }
 
 ########################################
-# 4) cake (qdisc) + BBR (tcp congestion control)
+# 4) fq_codel (qdisc) + BBR (tcp congestion control)
 ########################################
-step_bbr_cake() {
-  inf "Шаг 4: включение cake (qdisc) + BBR (congestion control)"
+step_fq_codel_bbr() {
+  inf "Шаг 4: включение fq_codel (qdisc) + BBR (congestion control)"
 
   local old_qdisc old_cc
   old_qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || echo '(не удалось прочитать)')"
@@ -360,8 +360,9 @@ step_bbr_cake() {
   inf "Было net.core.default_qdisc = ${old_qdisc}"
   inf "Было net.ipv4.tcp_congestion_control = ${old_cc}"
 
-  cat > /etc/sysctl.d/99-cake-bbr.conf <<EOF
-net.core.default_qdisc = cake
+  rm -f /etc/sysctl.d/99-cake-bbr.conf /etc/sysctl.d/99-fq-cubic.conf
+  cat > /etc/sysctl.d/99-fq-codel-bbr.conf <<EOF
+net.core.default_qdisc = fq_codel
 net.ipv4.tcp_congestion_control = bbr
 EOF
 
@@ -373,6 +374,41 @@ EOF
 
   ok "Стало net.core.default_qdisc = ${new_qdisc} (было: ${old_qdisc})"
   ok "Стало net.ipv4.tcp_congestion_control = ${new_cc} (было: ${old_cc})"
+}
+
+########################################
+# 5) Docker
+########################################
+step_docker() {
+  inf "Шаг 5: установка Docker Engine"
+
+  apt-get update -qq >/dev/null
+  apt-get install -y -qq ca-certificates curl gnupg >/dev/null
+
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+  chmod a+r /etc/apt/keyrings/docker.asc
+
+  local arch codename
+  arch="$(dpkg --print-architecture)"
+  codename="$(. /etc/os-release && echo "${VERSION_CODENAME:-}")"
+  if [[ -z "$codename" ]]; then
+    err "Не удалось определить VERSION_CODENAME из /etc/os-release."
+    exit 1
+  fi
+
+  cat > /etc/apt/sources.list.d/docker.list <<EOF
+deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${codename} stable
+EOF
+
+  apt-get update -qq >/dev/null
+  apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin >/dev/null
+
+  systemctl enable --now docker
+
+  docker --version
+  docker compose version
+  ok "Docker Engine и Docker Compose plugin установлены и запущены"
 }
 
 ########################################
@@ -424,10 +460,11 @@ show_menu() {
   echo -e "  ${GREEN}1)${RESET} ufw: установка + открытие порта SSH"
   echo -e "  ${GREEN}2)${RESET} rsyslog + traffic-guard"
   echo -e "  ${GREEN}3)${RESET} fallback-сайт (nginx + certbot)"
-  echo -e "  ${GREEN}4)${RESET} cake + BBR (sysctl)"
-  echo -e "  ${GREEN}5)${RESET} всё подряд (1, 2, 3, 4)"
+  echo -e "  ${GREEN}4)${RESET} fq_codel + BBR (sysctl)"
+  echo -e "  ${GREEN}5)${RESET} Docker Engine + Compose plugin"
+  echo -e "  ${GREEN}6)${RESET} всё подряд (1, 2, 3, 4, 5)"
   echo
-  echo -e "  ${MAGENTA}6)${RESET} ${GRAY}[утилита, не входит в «всё»]${RESET} ufw: разрешить IP на порт"
+  echo -e "  ${MAGENTA}7)${RESET} ${GRAY}[утилита, не входит в «всё»]${RESET} ufw: разрешить IP на порт"
   echo
   echo -e "  ${RED}0)${RESET} выход"
   echo
@@ -435,7 +472,7 @@ show_menu() {
 
 while true; do
   show_menu
-  read -rp "$(echo -e "${BOLD}Введите номера через запятую (например: 1,3), 5 для всего или 0 для выхода:${RESET} ")" CHOICE
+  read -rp "$(echo -e "${BOLD}Введите номера через запятую (например: 1,3), 6 для всего или 0 для выхода:${RESET} ")" CHOICE
   CHOICE="$(echo -n "$CHOICE" | xargs)"
 
   if [[ -z "$CHOICE" ]]; then
@@ -449,11 +486,11 @@ while true; do
     exit 0
   fi
 
-  RUN_UFW=false; RUN_BASE=false; RUN_SITE=false; RUN_BBR=false; RUN_UTIL=false
+  RUN_UFW=false; RUN_BASE=false; RUN_SITE=false; RUN_FQ_CODEL_BBR=false; RUN_DOCKER=false; RUN_UTIL=false
   BAD_CHOICE=false
 
-  if [[ "$CHOICE" == "5" ]]; then
-    RUN_UFW=true; RUN_BASE=true; RUN_SITE=true; RUN_BBR=true
+  if [[ "$CHOICE" == "6" ]]; then
+    RUN_UFW=true; RUN_BASE=true; RUN_SITE=true; RUN_FQ_CODEL_BBR=true; RUN_DOCKER=true
   else
     IFS=',' read -ra PARTS <<< "$CHOICE"
     for p in "${PARTS[@]}"; do
@@ -462,9 +499,10 @@ while true; do
         1) RUN_UFW=true ;;
         2) RUN_BASE=true ;;
         3) RUN_SITE=true ;;
-        4) RUN_BBR=true ;;
-        6) RUN_UTIL=true ;;
-        *) warn "Неизвестный пункт: '$p' (допустимо: 1, 2, 3, 4, 5, 6, 0)"; BAD_CHOICE=true ;;
+        4) RUN_FQ_CODEL_BBR=true ;;
+        5) RUN_DOCKER=true ;;
+        7) RUN_UTIL=true ;;
+        *) warn "Неизвестный пункт: '$p' (допустимо: 1, 2, 3, 4, 5, 6, 7, 0)"; BAD_CHOICE=true ;;
       esac
     done
   fi
@@ -478,15 +516,17 @@ while true; do
   if $RUN_UFW; then SELECTED+="1 "; fi
   if $RUN_BASE; then SELECTED+="2 "; fi
   if $RUN_SITE; then SELECTED+="3 "; fi
-  if $RUN_BBR; then SELECTED+="4 "; fi
-  if $RUN_UTIL; then SELECTED+="6(утилита) "; fi
+  if $RUN_FQ_CODEL_BBR; then SELECTED+="4 "; fi
+  if $RUN_DOCKER; then SELECTED+="5 "; fi
+  if $RUN_UTIL; then SELECTED+="7(утилита) "; fi
   inf "Будут выполнены шаги: ${SELECTED}"
   echo
 
   if $RUN_UFW; then step_ufw; fi
   if $RUN_BASE; then step_base_setup; fi
   if $RUN_SITE; then step_fallback_site; fi
-  if $RUN_BBR; then step_bbr_cake; fi
+  if $RUN_FQ_CODEL_BBR; then step_fq_codel_bbr; fi
+  if $RUN_DOCKER; then step_docker; fi
   if $RUN_UTIL; then util_ufw_allow_ip_port; fi
 
   ok "Готово: выбранные шаги выполнены успешно."
