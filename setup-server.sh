@@ -183,6 +183,11 @@ step_fallback_site() {
     err "E-mail не может быть пустым (нужен для certbot)."
     exit 1
   fi
+  if [[ "$CERT_EMAIL" == *[![:ascii:]]* ]] || \
+     [[ ! "$CERT_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+    err "Некорректный e-mail: '$CERT_EMAIL'. Используйте ASCII-адрес, например admin@example.com."
+    exit 1
+  fi
 
   WEBROOT="/var/www/${DOMAIN}"
   SITE_CONF="/etc/nginx/sites-available/${DOMAIN}"
