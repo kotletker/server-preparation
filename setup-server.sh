@@ -244,8 +244,16 @@ step_fallback_site() {
   inf "Установка nginx"
   apt-get install -y -qq nginx >/dev/null
 
-  ufw_allow 80/tcp comment 'HTTP (fallback site + certbot)'
+  # Длинные домены упираются в дефолт 32/64. Правим nginx.conf (не conf.d),
+  # чтобы не получить duplicate, если директива уже раскомментирована.
+  rm -f /etc/nginx/conf.d/server_names_hash.conf
+  if grep -Eq '^[[:space:]]*#?[[:space:]]*server_names_hash_bucket_size[[:space:]]+' /etc/nginx/nginx.conf; then
+    sed -i -E 's/^[[:space:]]*#?[[:space:]]*server_names_hash_bucket_size[[:space:]]+[0-9]+;/        server_names_hash_bucket_size 128;/' /etc/nginx/nginx.conf
+  else
+    sed -i '/^http[[:space:]]*{/a\        server_names_hash_bucket_size 128;' /etc/nginx/nginx.conf
+  fi
 
+  ufw_allow 80/tcp comment 'HTTP (fallback site + certbot)'
   inf "Настройка HTTP-конфига (порт 80) для выпуска сертификата"
   cat > "$SITE_CONF" <<EOF
 server {
@@ -274,21 +282,26 @@ EOF
   ok "Сертификат для $DOMAIN выпущен"
 
   # --- добавляем SSL-блок (127.0.0.1:8080) к уже существующему блоку на порту 80 ---
+  # X25519MLKEM768 нужен OpenSSL ≥ 3.5; на старых сборках ssl_conf_command падает на nginx -t
+  SSL_GROUPS_LINE=""
+  if openssl list -groups 2>/dev/null | grep -q 'X25519MLKEM768'; then
+    SSL_GROUPS_LINE=$'    ssl_conf_command Groups X25519MLKEM768:X25519;\n'
+  else
+    warn "OpenSSL без X25519MLKEM768 — директива ssl_conf_command Groups пропущена"
+  fi
+
   if [[ "$SITE_VERSION" == "1" ]]; then
     inf "Добавление обычного SSL-блока (127.0.0.1:8080, proxy_protocol) к конфигу, блок на порту 80 остаётся"
     cat >> "$SITE_CONF" <<EOF
 
 server {
-    listen 127.0.0.1:8080 ssl proxy_protocol;
-    http2 on;
+    listen 127.0.0.1:8080 ssl http2 proxy_protocol;
     server_name ${DOMAIN};
 
     ssl_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
     ssl_protocols TLSv1.3;
-    ssl_conf_command Groups X25519MLKEM768:X25519;
-
-    set_real_ip_from 127.0.0.1;
+${SSL_GROUPS_LINE}    set_real_ip_from 127.0.0.1;
     real_ip_header proxy_protocol;
 
     root ${WEBROOT};
@@ -306,8 +319,7 @@ EOF
     cat >> "$SITE_CONF" <<EOF
 
 server {
-    listen 127.0.0.1:8080 ssl proxy_protocol;
-    http2 on;
+    listen 127.0.0.1:8080 ssl http2 proxy_protocol;
     server_name ${DOMAIN};
 
     ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
