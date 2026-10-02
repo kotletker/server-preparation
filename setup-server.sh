@@ -244,14 +244,16 @@ step_fallback_site() {
   inf "Установка nginx"
   apt-get install -y -qq nginx >/dev/null
 
-  # Длинные домены (и дефолтный default_server) упираются в server_names_hash_bucket_size=32
-  mkdir -p /etc/nginx/conf.d
-  cat > /etc/nginx/conf.d/server_names_hash.conf <<'EOF'
-server_names_hash_bucket_size 128;
-EOF
+  # Длинные домены упираются в дефолт 32/64. Правим nginx.conf (не conf.d),
+  # чтобы не получить duplicate, если директива уже раскомментирована.
+  rm -f /etc/nginx/conf.d/server_names_hash.conf
+  if grep -Eq '^[[:space:]]*#?[[:space:]]*server_names_hash_bucket_size[[:space:]]+' /etc/nginx/nginx.conf; then
+    sed -i -E 's/^[[:space:]]*#?[[:space:]]*server_names_hash_bucket_size[[:space:]]+[0-9]+;/        server_names_hash_bucket_size 128;/' /etc/nginx/nginx.conf
+  else
+    sed -i '/^http[[:space:]]*{/a\        server_names_hash_bucket_size 128;' /etc/nginx/nginx.conf
+  fi
 
   ufw_allow 80/tcp comment 'HTTP (fallback site + certbot)'
-
   inf "Настройка HTTP-конфига (порт 80) для выпуска сертификата"
   cat > "$SITE_CONF" <<EOF
 server {
