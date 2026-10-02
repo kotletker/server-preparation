@@ -287,8 +287,7 @@ EOF
     cat >> "$SITE_CONF" <<EOF
 
 server {
-    listen 127.0.0.1:8080 ssl proxy_protocol;
-    http2 on;
+    listen 127.0.0.1:8080 ssl http2 proxy_protocol;
     server_name ${DOMAIN};
 
     ssl_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
@@ -314,8 +313,7 @@ EOF
     cat >> "$SITE_CONF" <<EOF
 
 server {
-    listen 127.0.0.1:8080 ssl proxy_protocol;
-    http2 on;
+    listen 127.0.0.1:8080 ssl http2 proxy_protocol;
     server_name ${DOMAIN};
 
     ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
